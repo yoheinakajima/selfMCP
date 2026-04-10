@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+.envrc
+dist/
+build/
+.pytest_cache/
+
+# SQLite database files
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+selfmcp.db*
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
