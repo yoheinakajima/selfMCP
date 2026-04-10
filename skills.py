@@ -155,6 +155,10 @@ def skill_create(
 ) -> dict[str, Any]:
     """Create a new skill. Writes to skills, seeds skill_versions v1,
     upserts FTS + embeddings, and regenerates the summary cache.
+
+    If a soft-deleted skill with the same name already exists, it is
+    reactivated with the new content instead of failing with a UNIQUE
+    constraint error.
     """
     if not name or not description or not body:
         return {"error": "name, description, and body are required"}
@@ -163,31 +167,53 @@ def skill_create(
     deps_json = json.dumps(dependencies or [])
     auth_json = json.dumps(auth_config) if auth_config else None
 
-    with get_conn() as conn:
-        try:
-            cur = conn.execute(
-                "INSERT INTO skills "
-                "(name, description, body, dependencies_json, auth_config_json, "
-                " version, is_active, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)",
-                (name, description, body, deps_json, auth_json, now, now),
-            )
-        except Exception as e:
-            return {"error": f"create failed: {e}"}
+    skill_id: int
+    skill_version: int
 
-        skill_id = cur.lastrowid
-        conn.execute(
-            "INSERT INTO skill_versions "
-            "(skill_id, version, name, description, body, dependencies_json, "
-            " auth_config_json, changed_at) "
-            "VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
-            (skill_id, name, description, body, deps_json, auth_json, now),
-        )
+    with get_conn() as conn:
+        # Reactivate a soft-deleted entry rather than hitting the UNIQUE constraint.
+        deleted = conn.execute(
+            "SELECT * FROM skills WHERE name = ? AND is_active = 0", (name,)
+        ).fetchone()
+
+        if deleted:
+            _archive_version(conn, deleted)
+            skill_version = deleted["version"] + 1
+            conn.execute(
+                "UPDATE skills SET "
+                "  description = ?, body = ?, dependencies_json = ?, "
+                "  auth_config_json = ?, version = ?, is_active = 1, "
+                "  created_at = ?, updated_at = ? "
+                "WHERE id = ?",
+                (description, body, deps_json, auth_json, skill_version, now, now, deleted["id"]),
+            )
+            skill_id = deleted["id"]
+        else:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO skills "
+                    "(name, description, body, dependencies_json, auth_config_json, "
+                    " version, is_active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)",
+                    (name, description, body, deps_json, auth_json, now, now),
+                )
+            except Exception as e:
+                return {"error": f"create failed: {e}"}
+            skill_id = cur.lastrowid
+            skill_version = 1
+            conn.execute(
+                "INSERT INTO skill_versions "
+                "(skill_id, version, name, description, body, dependencies_json, "
+                " auth_config_json, changed_at) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+                (skill_id, name, description, body, deps_json, auth_json, now),
+            )
+
         _fts_upsert(conn, skill_id, name, description)
         _embedding_upsert(conn, skill_id, f"{name}\n{description}")
 
     _regen_summary_cache()
-    return {"id": skill_id, "name": name, "version": 1, "status": "created"}
+    return {"id": skill_id, "name": name, "version": skill_version, "status": "created"}
 
 
 def skill_update(
@@ -291,10 +317,16 @@ def skill_execute(
     if auth_config:
         missing = _check_auth_requirements(auth_config)
         if missing:
+            hint = f"Call skill_auth_url(skill_id={skill_id}) for setup instructions."
+            repl_owner = os.environ.get("REPL_OWNER")
+            repl_slug = os.environ.get("REPL_SLUG")
+            if repl_owner and repl_slug:
+                secrets_url = f"https://replit.com/@{repl_owner}/{repl_slug}#secrets"
+                hint += f" On Replit, add the missing vars at: {secrets_url}"
             return {
                 "error": "missing_credentials",
                 "missing": missing,
-                "hint": f"Call skill_auth_url(skill_id={skill_id}) for setup instructions.",
+                "hint": hint,
             }
 
     return _execute_skill(body, params or {}, timeout=timeout)
@@ -451,17 +483,29 @@ def skill_auth_url(skill_id: int) -> dict[str, Any]:
 
     if t == "api_key":
         env_var = auth_config.get("env_var")
-        return {
+        instructions = auth_config.get(
+            "instructions",
+            f"Set the {env_var} environment variable and restart the server.",
+        )
+        result: dict[str, Any] = {
             "id": skill_id,
             "auth_type": "api_key",
             "env_var": env_var,
             "is_configured": not missing,
             "missing": missing,
-            "instructions": auth_config.get(
-                "instructions",
-                f"Set the {env_var} environment variable and restart the server.",
-            ),
+            "instructions": instructions,
         }
+        # On Replit, surface a direct link to the Secrets panel.
+        repl_owner = os.environ.get("REPL_OWNER")
+        repl_slug = os.environ.get("REPL_SLUG")
+        if repl_owner and repl_slug and missing:
+            setup_url = f"https://replit.com/@{repl_owner}/{repl_slug}#secrets"
+            result["setup_url"] = setup_url
+            result["instructions"] = (
+                f"{instructions} "
+                f"On Replit, open Secrets and add {env_var}: {setup_url}"
+            )
+        return result
 
     if t == "oauth2":
         auth_url = auth_config.get("auth_url", "")

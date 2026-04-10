@@ -28,10 +28,10 @@ Everything lives in a single SQLite file — no external services required.
 
 | Tool            | Purpose |
 |-----------------|---------|
-| `skill_create`  | Insert a new skill (name, description, body, deps, auth_config). Seeds FTS, embeddings, and v1 in `skill_versions`. |
+| `skill_create`  | Insert a new skill (name, description, body, deps, auth_config). Seeds FTS, embeddings, and v1 in `skill_versions`. If a soft-deleted skill with the same name exists, it is reactivated. |
 | `skill_update`  | Patch an existing skill by id. Archives the previous row and bumps `version`. |
 | `skill_delete`  | Soft-delete. Row stays in `skills` with `is_active=0`; history preserved in `skill_versions`. |
-| `skill_execute` | Run a skill body as a Python subprocess with `SELFMCP_PARAMS` env. Returns `{stdout, stderr, exit_code, timed_out}`. |
+| `skill_execute` | Run a skill body as a Python subprocess. Passes `SELFMCP_PARAMS` and the full server environment (including API keys) to the subprocess. Returns `{stdout, stderr, exit_code, timed_out}`. |
 
 ### Discovery layer
 
@@ -40,7 +40,88 @@ Everything lives in a single SQLite file — no external services required.
 | `skill_list_summary` | Materialized table of contents: `[{id, name, short_description}]`. Cheap to inject into context. |
 | `skill_get_detail`   | Full record for a single skill: body, deps, auth_config, version, timestamps. |
 | `skill_search`       | Hybrid FTS5 + vector search. Modes: `keyword`, `vector`, `hybrid` (default). |
-| `skill_auth_url`     | For skills with `auth_config`, returns either an API-key instruction string or a prefilled OAuth2 URL. |
+| `skill_auth_url`     | For skills with `auth_config`, returns either an API-key instruction string or a prefilled OAuth2 URL. On Replit, includes a direct link to the Secrets panel. |
+
+## Using API keys in skills
+
+Skills run as Python subprocesses that **inherit the server's full environment**.
+This means any environment variable (API key, secret, config) set on the server
+is automatically available inside skill code via `os.environ` — no need to pass
+keys as parameters.
+
+### Reading a key inside a skill
+
+```python
+import json, os
+
+params = json.loads(os.environ.get("SELFMCP_PARAMS", "{}"))
+api_key = os.environ.get("ANTHROPIC_API_KEY")  # set once on the server, used everywhere
+```
+
+### Setting keys on the server
+
+How you expose env vars to the server depends on your deployment:
+
+| Deployment | How to set env vars |
+|------------|---------------------|
+| **Replit** | Tools → Secrets → add key/value pairs, then restart |
+| **Local**  | `export ANTHROPIC_API_KEY=sk-ant-...` before running `server.py` |
+| **Docker** | Pass `-e ANTHROPIC_API_KEY=sk-ant-...` to `docker run` |
+| **Claude Desktop (stdio)** | Add to the `env` block in `claude_desktop_config.json` |
+
+### Declaring `auth_config` (strongly recommended)
+
+When creating a skill that calls an external API, always declare `auth_config`.
+This lets `skill_execute` detect a missing key *before* running the skill and
+return an actionable error instead of a cryptic 401:
+
+```json
+{
+  "type": "api_key",
+  "env_var": "ANTHROPIC_API_KEY",
+  "instructions": "Get a key at https://console.anthropic.com/"
+}
+```
+
+A complete `skill_create` call that follows this pattern:
+
+```python
+skill_create(
+    name="write_haiku",
+    description="Write a haiku on any topic using Claude.",
+    body="""
+import json, os
+import anthropic
+
+params = json.loads(os.environ.get("SELFMCP_PARAMS", "{}"))
+topic = params.get("topic", "nature")
+
+client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env automatically
+msg = client.messages.create(
+    model="claude-opus-4-6",
+    max_tokens=64,
+    messages=[{"role": "user", "content": f"Write a haiku about {topic}."}],
+)
+print(msg.content[0].text)
+""",
+    dependencies=["anthropic"],
+    auth_config={
+        "type": "api_key",
+        "env_var": "ANTHROPIC_API_KEY",
+        "instructions": "Get a key at https://console.anthropic.com/",
+    },
+)
+```
+
+When the key is missing, `skill_execute` returns:
+
+```json
+{
+  "error": "missing_credentials",
+  "missing": ["ANTHROPIC_API_KEY"],
+  "hint": "Call skill_auth_url(skill_id=1) for setup instructions. On Replit, add the missing vars at: https://replit.com/@you/your-repl#secrets"
+}
+```
 
 ## Storage
 
@@ -104,8 +185,8 @@ Each skill can declare an `auth_config`. Two types are built in:
 When `skill_execute` is called, the server checks whether the required env
 vars are set. If not, it returns a `missing_credentials` error pointing at
 `skill_auth_url`, which returns human-readable instructions (or, for OAuth2,
-a pre-filled authorization URL). The client renders that as a clickable
-link for the user.
+a pre-filled authorization URL, and on Replit a direct link to the Secrets
+panel). The client renders that as a clickable link for the user.
 
 ## Running locally
 
@@ -152,12 +233,18 @@ All env vars:
 4. The server picks up Replit's injected `PORT` environment variable
    automatically, so no manual port configuration is needed.
 
-5. **(Optional)** Add secrets in **Tools → Secrets**:
+5. **Add secrets** in **Tools → Secrets** (lock icon in the sidebar). Any key
+   you add here becomes an environment variable available to the server _and_
+   to every skill it executes:
 
-   | Secret key          | Value                        |
-   |---------------------|------------------------------|
-   | `OPENAI_API_KEY`    | `sk-...` (enables real embeddings) |
-   | `SELFMCP_DB_PATH`   | `/home/user/selfmcp.db` (explicit persistent path) |
+   | Secret key          | Value                        | Purpose |
+   |---------------------|------------------------------|---------|
+   | `ANTHROPIC_API_KEY` | `sk-ant-...`                 | Required for skills that call Claude |
+   | `OPENAI_API_KEY`    | `sk-...`                     | Enables real embeddings + OpenAI skills |
+   | `SELFMCP_DB_PATH`   | `/home/user/selfmcp.db`      | Explicit persistent path (optional) |
+
+   After adding a secret, **restart the Repl** so the server picks up the new
+   value. Skills created after that point can use the key via `os.environ`.
 
 6. **Connect Claude.ai** — once the Repl is running, copy the public URL
    (shown in the Webview tab, e.g. `https://<repl-name>.<username>.repl.co`)
@@ -195,7 +282,10 @@ Add the server to Claude Desktop (`~/.config/Claude/claude_desktop_config.json`)
     "selfmcp": {
       "command": "python3",
       "args": ["/absolute/path/to/selfMCP/server.py"],
-      "env": { "SELFMCP_TRANSPORT": "stdio" }
+      "env": {
+        "SELFMCP_TRANSPORT": "stdio",
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
     }
   }
 }
@@ -203,6 +293,30 @@ Add the server to Claude Desktop (`~/.config/Claude/claude_desktop_config.json`)
 
 Or register as a remote MCP server in Claude.ai pointing at
 `http://your-host:8000/mcp`.
+
+## Troubleshooting
+
+**Skill execution returns a 401 / auth error**
+
+The skill is calling an external API but the key isn't set on the server.
+Skills inherit the server's environment, so the fix is to add the key there:
+- Replit: Tools → Secrets → add the key → restart the Repl
+- Local: `export ANTHROPIC_API_KEY=sk-ant-...` then restart `server.py`
+
+To make this detectable in the future, update the skill to declare
+`auth_config` (see [Declaring auth_config](#declaring-auth_config-strongly-recommended)).
+
+**`skill_create` returns a name-conflict error after deleting a skill**
+
+`skill_delete` is a soft-delete — the row is kept for history. If you want to
+reuse the same name, call `skill_create` again with the same name and it will
+automatically reactivate the deleted entry rather than failing.
+
+**Skills don't see environment variables I set**
+
+Env vars are read when the server *starts*. If you add or change a secret
+after the server is running, restart it. On Replit that means stopping and
+re-running the Repl.
 
 ## Tests
 
@@ -233,6 +347,10 @@ test_selfmcp.py Tests for the core logic
 - **Versioning is cheap.** Every `skill_update` and `skill_delete` writes
   the prior row to `skill_versions`, so the LLM can diff, explain, or roll
   back history on demand.
+- **Soft-delete with name reuse.** `skill_delete` marks a row `is_active=0`
+  and preserves history. `skill_create` with a previously-used name reactivates
+  the old entry rather than failing — so a delete-then-recreate cycle works
+  as expected.
 - **Why SQLite + FTS5 rather than a vector DB?** Single file, no ops, deploys
   to Replit trivially. When you outgrow linear cosine sim, swap the
   `_embedding_upsert` / search implementation for a proper index — the
