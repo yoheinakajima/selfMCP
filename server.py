@@ -24,24 +24,26 @@ from mcp.server.fastmcp import FastMCP
 
 import skills as S
 from db import init_db
+from skills import seed_about_skill
 
 
 def build_server() -> FastMCP:
     mcp = FastMCP(
         "selfmcp",
         instructions=(
-            "A self-extending skill registry. Use skill_list_summary to see what's "
-            "available, skill_search to find specific skills, and skill_get_detail "
-            "to fetch a full skill body. Create new skills with skill_create when "
-            "you encounter a task that would benefit from being captured for reuse. "
-            "Skills run as subprocesses and inherit the server's environment, so any "
-            "API key set on the server (e.g. ANTHROPIC_API_KEY, OPENAI_API_KEY) is "
-            "automatically available via os.environ inside skill code — no need to "
-            "pass keys as params. When creating a skill that calls an external API, "
-            "always declare auth_config so skill_execute can detect a missing key "
-            "before running: "
-            '{\"type\": \"api_key\", \"env_var\": \"ANTHROPIC_API_KEY\", '
-            '\"instructions\": \"Get a key at https://console.anthropic.com/\"}'
+            "selfMCP — a self-extending skill registry. "
+            "Source: https://github.com/yoheinakajima/selfMCP. "
+            "Interface: MCP-only, no web UI; connect via Claude.ai, Claude Desktop, Cursor, etc. "
+            "Versioning: skill_delete is a soft-delete (history kept in skill_versions); "
+            "skill_create reactivates a deleted name instead of erroring. "
+            "API keys: skills inherit the server's full environment, so keys set on the server "
+            "(e.g. ANTHROPIC_API_KEY in Replit Secrets) are available via os.environ inside "
+            "skill code — never pass keys as params; declare auth_config so skill_execute "
+            "can detect a missing key before running. "
+            "Workflow: skill_list_summary → skill_search → skill_get_detail → skill_execute. "
+            "Self-documentation: a built-in skill named 'selfmcp_about' is always in the "
+            "registry — execute it (find its id with skill_search('selfmcp_about')) for "
+            "detailed answers about versioning, execution, auth, all 8 tools, and setup."
         ),
         host=os.environ.get("SELFMCP_HOST", "0.0.0.0"),
         port=int(os.environ.get("SELFMCP_PORT", os.environ.get("PORT", "8000"))),
@@ -169,6 +171,7 @@ def build_server() -> FastMCP:
 
 def main() -> None:
     init_db()
+    seed_about_skill()
     transport = os.environ.get("SELFMCP_TRANSPORT", "streamable-http")
     if transport not in ("stdio", "sse", "streamable-http"):
         raise SystemExit(

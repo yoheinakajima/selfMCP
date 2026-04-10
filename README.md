@@ -42,6 +42,32 @@ Everything lives in a single SQLite file — no external services required.
 | `skill_search`       | Hybrid FTS5 + vector search. Modes: `keyword`, `vector`, `hybrid` (default). |
 | `skill_auth_url`     | For skills with `auth_config`, returns either an API-key instruction string or a prefilled OAuth2 URL. On Replit, includes a direct link to the Secrets panel. |
 
+## Built-in skill: `selfmcp_about`
+
+The server seeds a skill named `selfmcp_about` on first startup. Any connected
+agent can execute it to get a structured self-documentation dump covering:
+source code location, interface type (MCP-only, no UI), transport options,
+persistence, versioning/soft-delete behavior, execution model, auth, all 8
+bootstrap tools, search modes, and Replit setup steps.
+
+```
+# Find the skill id (usually 1 on a fresh install):
+skill_search("selfmcp_about")
+
+# Run it for the full doc:
+skill_execute(skill_id=<id>)
+
+# Or focus on one section:
+skill_execute(skill_id=<id>, params={"section": "versioning"})
+```
+
+Available sections: `source_code`, `interface`, `transport`, `persistence`,
+`versioning`, `execution`, `auth`, `bootstrap_tools`, `search`, `replit_setup`.
+
+The skill is created once and then left alone — if you delete it, it won't
+come back on restart (intentional). To restore it, call `skill_create` with
+the name `selfmcp_about` and it will be reactivated from history.
+
 ## Using API keys in skills
 
 Skills run as Python subprocesses that **inherit the server's full environment**.
