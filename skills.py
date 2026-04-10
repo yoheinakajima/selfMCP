@@ -21,6 +21,155 @@ from executor import execute_skill as _execute_skill
 
 
 # --------------------------------------------------------------------------- #
+# Built-in self-documentation skill
+# --------------------------------------------------------------------------- #
+
+_ABOUT_SKILL_NAME = "selfmcp_about"
+
+_ABOUT_SKILL_DESCRIPTION = (
+    "Self-documentation for the selfMCP server. Returns structured facts about "
+    "the source code location, interface, versioning, skill execution model, auth, "
+    "all 8 bootstrap tools, search, and Replit setup. "
+    "Pass {\"section\": \"<key>\"} to focus on one area, or omit params for the full doc. "
+    "Available sections: source_code, interface, transport, persistence, versioning, "
+    "execution, auth, bootstrap_tools, search, replit_setup."
+)
+
+_ABOUT_SKILL_BODY = '''import json, os
+
+params = json.loads(os.environ.get("SELFMCP_PARAMS", "{}"))
+section = params.get("section")
+
+INFO = {
+    "source_code": "https://github.com/yoheinakajima/selfMCP",
+    "interface": (
+        "MCP-only — there is no web UI. Connect via Claude.ai, Claude Desktop, "
+        "Cursor, or any MCP-compatible client."
+    ),
+    "transport": (
+        "streamable-http by default (mounts at /mcp), SSE, or stdio. "
+        "Set SELFMCP_TRANSPORT env var to switch. "
+        "Default port 8000; Replit injects PORT automatically."
+    ),
+    "persistence": (
+        "Single SQLite file (selfmcp.db in the working directory). "
+        "Survives restarts on Replit private Repls. "
+        "Override location with SELFMCP_DB_PATH."
+    ),
+    "versioning": {
+        "how_it_works": (
+            "Every skill_update and skill_delete appends the prior row to "
+            "skill_versions (append-only audit log). No history is ever deleted."
+        ),
+        "soft_delete": (
+            "skill_delete sets is_active=0 on the row — it does NOT remove it. "
+            "The name stays in the table but the skill is hidden from all normal queries."
+        ),
+        "name_reuse": (
+            "skill_create with a previously-deleted name reactivates the old "
+            "entry (archives the deleted state, bumps version, flips is_active=1). "
+            "It does not error with a name-conflict."
+        ),
+        "rollback": (
+            "Full history lives in skill_versions. Inspect it with skill_get_detail "
+            "(shows current version number), then use skill_update to restore a prior body."
+        ),
+    },
+    "execution": {
+        "how": (
+            "skill_execute writes the skill body to a temp directory and runs it "
+            "as a Python subprocess. The temp dir is cleaned up after each run."
+        ),
+        "env_inheritance": (
+            "The subprocess inherits the server\'s FULL environment. Any API key "
+            "set on the server (e.g. ANTHROPIC_API_KEY added to Replit Secrets) "
+            "is available inside skill code via os.environ — no need to pass keys "
+            "as params."
+        ),
+        "params": (
+            "Call skill_execute with a params dict. Inside the skill, read it with: "
+            "params = json.loads(os.environ.get(\'SELFMCP_PARAMS\', \'{}\'))"
+        ),
+        "security": (
+            "Not a hardened sandbox — skills run with server privileges in a "
+            "fresh CWD. Wrap in a container or nsjail for untrusted code."
+        ),
+    },
+    "auth": {
+        "declare": (
+            "Add auth_config to skill_create for any skill that reads an env-var key. "
+            "skill_execute checks for the key before running; if missing it returns "
+            "a missing_credentials error instead of a cryptic 401."
+        ),
+        "api_key_example": (
+            \'{"type": "api_key", "env_var": "ANTHROPIC_API_KEY", \' +
+            \'"instructions": "Get a key at https://console.anthropic.com/"}\'
+        ),
+        "replit_hint": (
+            "When running on Replit, the missing_credentials error and skill_auth_url "
+            "both include a direct link to the Secrets panel so the user can add the "
+            "key without leaving Claude."
+        ),
+        "oauth2": (
+            "Also supports type=oauth2 with auth_url, token_url, scopes, "
+            "client_id_env, client_secret_env fields."
+        ),
+    },
+    "bootstrap_tools": [
+        "skill_create       — add a new skill; reactivates soft-deleted names automatically",
+        "skill_update       — patch a skill by id and bump its version",
+        "skill_delete       — soft-delete (row kept, history in skill_versions)",
+        "skill_execute      — run a skill in a subprocess (inherits full server env)",
+        "skill_list_summary — compact TOC [{id,name,short_description}] (cheap, safe to inject)",
+        "skill_get_detail   — full record: body, deps, auth_config, version, timestamps",
+        "skill_search       — hybrid FTS5+vector search; modes: keyword/vector/hybrid",
+        "skill_auth_url     — auth instructions / prefilled OAuth2 URL for a skill",
+    ],
+    "search": {
+        "modes": "keyword (FTS5 BM25), vector (cosine sim on stored embeddings), hybrid (default, 50/50 merge)",
+        "embeddings": (
+            "LiteLLM text-embedding-3-small by default (needs OPENAI_API_KEY). "
+            "Falls back to a deterministic hash-based 256-dim embedding when offline."
+        ),
+        "workflow": "skill_list_summary → skill_search → skill_get_detail → skill_execute",
+    },
+    "replit_setup": [
+        "1. Import the repo from GitHub (yoheinakajima/selfMCP) into Replit.",
+        "2. Press Run — .replit sets transport and port automatically.",
+        "3. Add secrets in Tools → Secrets: ANTHROPIC_API_KEY, OPENAI_API_KEY.",
+        "4. Restart the Repl so the new secrets are picked up by the server.",
+        "5. Connect Claude.ai to https://<repl-name>.<username>.repl.co/mcp",
+    ],
+}
+
+if section:
+    val = INFO.get(section)
+    if val is None:
+        print(json.dumps({"error": f"Unknown section \'{section}\'", "available": list(INFO.keys())}))
+    else:
+        print(json.dumps({section: val}, indent=2))
+else:
+    print(json.dumps(INFO, indent=2))
+'''
+
+
+def seed_about_skill() -> None:
+    """Ensure the built-in selfmcp_about skill exists in the registry.
+
+    Called once at server startup. Creates the skill only if no row
+    (active or deleted) with the name already exists, so a user who
+    intentionally deletes it won't have it resurrected on every restart.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM skills WHERE name = ?", (_ABOUT_SKILL_NAME,)
+        ).fetchone()
+    if row is not None:
+        return  # Already exists (active or deleted) — leave it alone
+    skill_create(_ABOUT_SKILL_NAME, _ABOUT_SKILL_DESCRIPTION, _ABOUT_SKILL_BODY)
+
+
+# --------------------------------------------------------------------------- #
 # Internal helpers
 # --------------------------------------------------------------------------- #
 
@@ -155,6 +304,10 @@ def skill_create(
 ) -> dict[str, Any]:
     """Create a new skill. Writes to skills, seeds skill_versions v1,
     upserts FTS + embeddings, and regenerates the summary cache.
+
+    If a soft-deleted skill with the same name already exists, it is
+    reactivated with the new content instead of failing with a UNIQUE
+    constraint error.
     """
     if not name or not description or not body:
         return {"error": "name, description, and body are required"}
@@ -163,31 +316,53 @@ def skill_create(
     deps_json = json.dumps(dependencies or [])
     auth_json = json.dumps(auth_config) if auth_config else None
 
-    with get_conn() as conn:
-        try:
-            cur = conn.execute(
-                "INSERT INTO skills "
-                "(name, description, body, dependencies_json, auth_config_json, "
-                " version, is_active, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)",
-                (name, description, body, deps_json, auth_json, now, now),
-            )
-        except Exception as e:
-            return {"error": f"create failed: {e}"}
+    skill_id: int
+    skill_version: int
 
-        skill_id = cur.lastrowid
-        conn.execute(
-            "INSERT INTO skill_versions "
-            "(skill_id, version, name, description, body, dependencies_json, "
-            " auth_config_json, changed_at) "
-            "VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
-            (skill_id, name, description, body, deps_json, auth_json, now),
-        )
+    with get_conn() as conn:
+        # Reactivate a soft-deleted entry rather than hitting the UNIQUE constraint.
+        deleted = conn.execute(
+            "SELECT * FROM skills WHERE name = ? AND is_active = 0", (name,)
+        ).fetchone()
+
+        if deleted:
+            _archive_version(conn, deleted)
+            skill_version = deleted["version"] + 1
+            conn.execute(
+                "UPDATE skills SET "
+                "  description = ?, body = ?, dependencies_json = ?, "
+                "  auth_config_json = ?, version = ?, is_active = 1, "
+                "  created_at = ?, updated_at = ? "
+                "WHERE id = ?",
+                (description, body, deps_json, auth_json, skill_version, now, now, deleted["id"]),
+            )
+            skill_id = deleted["id"]
+        else:
+            try:
+                cur = conn.execute(
+                    "INSERT INTO skills "
+                    "(name, description, body, dependencies_json, auth_config_json, "
+                    " version, is_active, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, 1, 1, ?, ?)",
+                    (name, description, body, deps_json, auth_json, now, now),
+                )
+            except Exception as e:
+                return {"error": f"create failed: {e}"}
+            skill_id = cur.lastrowid
+            skill_version = 1
+            conn.execute(
+                "INSERT INTO skill_versions "
+                "(skill_id, version, name, description, body, dependencies_json, "
+                " auth_config_json, changed_at) "
+                "VALUES (?, 1, ?, ?, ?, ?, ?, ?)",
+                (skill_id, name, description, body, deps_json, auth_json, now),
+            )
+
         _fts_upsert(conn, skill_id, name, description)
         _embedding_upsert(conn, skill_id, f"{name}\n{description}")
 
     _regen_summary_cache()
-    return {"id": skill_id, "name": name, "version": 1, "status": "created"}
+    return {"id": skill_id, "name": name, "version": skill_version, "status": "created"}
 
 
 def skill_update(
@@ -291,10 +466,16 @@ def skill_execute(
     if auth_config:
         missing = _check_auth_requirements(auth_config)
         if missing:
+            hint = f"Call skill_auth_url(skill_id={skill_id}) for setup instructions."
+            repl_owner = os.environ.get("REPL_OWNER")
+            repl_slug = os.environ.get("REPL_SLUG")
+            if repl_owner and repl_slug:
+                secrets_url = f"https://replit.com/@{repl_owner}/{repl_slug}#secrets"
+                hint += f" On Replit, add the missing vars at: {secrets_url}"
             return {
                 "error": "missing_credentials",
                 "missing": missing,
-                "hint": f"Call skill_auth_url(skill_id={skill_id}) for setup instructions.",
+                "hint": hint,
             }
 
     return _execute_skill(body, params or {}, timeout=timeout)
@@ -451,17 +632,29 @@ def skill_auth_url(skill_id: int) -> dict[str, Any]:
 
     if t == "api_key":
         env_var = auth_config.get("env_var")
-        return {
+        instructions = auth_config.get(
+            "instructions",
+            f"Set the {env_var} environment variable and restart the server.",
+        )
+        result: dict[str, Any] = {
             "id": skill_id,
             "auth_type": "api_key",
             "env_var": env_var,
             "is_configured": not missing,
             "missing": missing,
-            "instructions": auth_config.get(
-                "instructions",
-                f"Set the {env_var} environment variable and restart the server.",
-            ),
+            "instructions": instructions,
         }
+        # On Replit, surface a direct link to the Secrets panel.
+        repl_owner = os.environ.get("REPL_OWNER")
+        repl_slug = os.environ.get("REPL_SLUG")
+        if repl_owner and repl_slug and missing:
+            setup_url = f"https://replit.com/@{repl_owner}/{repl_slug}#secrets"
+            result["setup_url"] = setup_url
+            result["instructions"] = (
+                f"{instructions} "
+                f"On Replit, open Secrets and add {env_var}: {setup_url}"
+            )
+        return result
 
     if t == "oauth2":
         auth_url = auth_config.get("auth_url", "")

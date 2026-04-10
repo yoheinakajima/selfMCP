@@ -24,16 +24,26 @@ from mcp.server.fastmcp import FastMCP
 
 import skills as S
 from db import init_db
+from skills import seed_about_skill
 
 
 def build_server() -> FastMCP:
     mcp = FastMCP(
         "selfmcp",
         instructions=(
-            "A self-extending skill registry. Use skill_list_summary to see what's "
-            "available, skill_search to find specific skills, and skill_get_detail "
-            "to fetch a full skill body. Create new skills with skill_create when "
-            "you encounter a task that would benefit from being captured for reuse."
+            "selfMCP — a self-extending skill registry. "
+            "Source: https://github.com/yoheinakajima/selfMCP. "
+            "Interface: MCP-only, no web UI; connect via Claude.ai, Claude Desktop, Cursor, etc. "
+            "Versioning: skill_delete is a soft-delete (history kept in skill_versions); "
+            "skill_create reactivates a deleted name instead of erroring. "
+            "API keys: skills inherit the server's full environment, so keys set on the server "
+            "(e.g. ANTHROPIC_API_KEY in Replit Secrets) are available via os.environ inside "
+            "skill code — never pass keys as params; declare auth_config so skill_execute "
+            "can detect a missing key before running. "
+            "Workflow: skill_list_summary → skill_search → skill_get_detail → skill_execute. "
+            "Self-documentation: a built-in skill named 'selfmcp_about' is always in the "
+            "registry — execute it (find its id with skill_search('selfmcp_about')) for "
+            "detailed answers about versioning, execution, auth, all 8 tools, and setup."
         ),
         host=os.environ.get("SELFMCP_HOST", "0.0.0.0"),
         port=int(os.environ.get("SELFMCP_PORT", os.environ.get("PORT", "8000"))),
@@ -54,14 +64,22 @@ def build_server() -> FastMCP:
             name: Unique short identifier for the skill.
             description: One-paragraph description used for search + summary.
             body: The SKILL.md content or raw Python script to store.
-            dependencies: Optional list of pip/npm package specs the skill needs.
-            auth_config: Optional auth descriptor. Supported types:
-                {"type": "api_key", "env_var": "FOO_KEY", "instructions": "..."}
+                Skills run as subprocesses and inherit the server's environment,
+                so any API key in the server env (e.g. ANTHROPIC_API_KEY) is
+                available via os.environ — never pass keys as params.
+            dependencies: Optional list of pip package specs the skill needs.
+            auth_config: Declare this for any skill that reads an env-var API key.
+                skill_execute will check for the key before running and surface
+                setup instructions if it is missing. Supported types:
+                {"type": "api_key", "env_var": "ANTHROPIC_API_KEY",
+                 "instructions": "Get a key at https://console.anthropic.com/"}
                 {"type": "oauth2", "auth_url": "...", "token_url": "...",
                  "scopes": [...], "client_id_env": "...", "client_secret_env": "..."}
 
         Returns:
             {"id", "name", "version", "status"} or {"error": "..."}.
+            If a soft-deleted skill with the same name exists it is reactivated
+            rather than returning a name-conflict error.
         """
         return S.skill_create(name, description, body, dependencies, auth_config)
 
@@ -94,9 +112,14 @@ def build_server() -> FastMCP:
         """Execute a skill in a sandboxed subprocess.
 
         ``params`` is forwarded to the skill as JSON in the ``SELFMCP_PARAMS``
-        env var. Returns ``{stdout, stderr, exit_code, timed_out}`` or a
-        ``missing_credentials`` error if the skill's auth_config has unset
-        env vars.
+        env var. The subprocess also inherits the server's full environment, so
+        API keys configured on the server (e.g. ANTHROPIC_API_KEY set in Replit
+        Secrets) are available to skill code via os.environ without any extra
+        plumbing.
+
+        Returns ``{stdout, stderr, exit_code, timed_out}`` on success, or a
+        ``missing_credentials`` error with setup instructions if the skill's
+        auth_config declares an env var that isn't set on the server.
         """
         return S.skill_execute(skill_id, params, timeout)
 
@@ -148,6 +171,7 @@ def build_server() -> FastMCP:
 
 def main() -> None:
     init_db()
+    seed_about_skill()
     transport = os.environ.get("SELFMCP_TRANSPORT", "streamable-http")
     if transport not in ("stdio", "sse", "streamable-http"):
         raise SystemExit(
