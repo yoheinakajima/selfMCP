@@ -42,13 +42,25 @@ Everything lives in a single SQLite file — no external services required.
 | `skill_search`       | Hybrid FTS5 + vector search. Modes: `keyword`, `vector`, `hybrid` (default). |
 | `skill_auth_url`     | For skills with `auth_config`, returns either an API-key instruction string or a prefilled OAuth2 URL. On Replit, includes a direct link to the Secrets panel. |
 
-## Built-in skill: `selfmcp_about`
+## Built-in core skills
 
-The server seeds a skill named `selfmcp_about` on first startup. Any connected
-agent can execute it to get a structured self-documentation dump covering:
-source code location, interface type (MCP-only, no UI), transport options,
-persistence, versioning/soft-delete behavior, execution model, auth, all 8
-bootstrap tools, search modes, and Replit setup steps.
+The server seeds two **core skills** on first startup. They're ordinary
+registry entries — searchable, executable, updatable — with two differences:
+
+1. `skill_delete` refuses to remove them (returns `cannot_delete_core_skill`).
+2. `skill_update` refuses to rename them (their name is fixed so the
+   core-skill lookup stays stable). Body, description, dependencies, and
+   `auth_config` can still be edited.
+
+You can update the body of a core skill to customize it, but it will always
+stay in the registry.
+
+### `selfmcp_about`
+
+Structured self-documentation dump covering: source code location, interface
+type (MCP-only, no UI), transport options, persistence, versioning/soft-delete
+behavior, execution model, auth, all 8 bootstrap tools, search modes, and
+Replit setup steps.
 
 ```
 # Find the skill id (usually 1 on a fresh install):
@@ -64,9 +76,31 @@ skill_execute(skill_id=<id>, params={"section": "versioning"})
 Available sections: `source_code`, `interface`, `transport`, `persistence`,
 `versioning`, `execution`, `auth`, `bootstrap_tools`, `search`, `replit_setup`.
 
-The skill is created once and then left alone — if you delete it, it won't
-come back on restart (intentional). To restore it, call `skill_create` with
-the name `selfmcp_about` and it will be reactivated from history.
+### `selfmcp_env_keys`
+
+Reports which API keys / credential environment variables are available to
+the server. **Only names are returned — values are never exposed.** The
+output includes two lists:
+
+- `known_services` — a curated map of well-known credential env vars
+  (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GITHUB_TOKEN`, `SLACK_BOT_TOKEN`,
+  `AWS_ACCESS_KEY_ID`, …) each tagged with `{present: true|false, service: ...}`.
+- `detected_credential_env_vars` — any other env var whose name matches a
+  credential-shaped pattern (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_KEY`,
+  `*_PASSWORD`, `*_CREDENTIALS`). Use this to find keys the curated list
+  didn't already know about.
+
+Call it before authoring a new skill to check what the LLM can actually
+reach — no point writing a Slack poster if `SLACK_BOT_TOKEN` isn't set.
+
+```
+skill_search("selfmcp_env_keys")      # find the id
+skill_execute(skill_id=<id>)          # no params needed
+```
+
+Inside a skill, values are still read the normal way via `os.environ` (the
+subprocess inherits the server's full environment), so this skill is for
+*discovery*, not for fetching secrets.
 
 ## Using API keys in skills
 
