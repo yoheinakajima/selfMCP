@@ -11,6 +11,20 @@ variable as a JSON string. Skills can read it with::
     import json, os
     params = json.loads(os.environ.get("SELFMCP_PARAMS", "{}"))
 
+Skill composition
+-----------------
+The executor also exposes the in-skill SDK (:mod:`selfmcp_sdk`) to every
+subprocess by:
+
+  * prepending the selfMCP repo root to the child's ``PYTHONPATH`` so
+    ``import selfmcp_sdk`` works from the temp cwd, and
+  * resolving ``SELFMCP_DB_PATH`` to an absolute path so the SDK can open
+    the same SQLite file the server is using.
+
+That gives skill code first-class access to ``run_skill`` /
+``search_skills`` / ``get_skill`` / ``list_skills`` for composing other
+skills without going back through the MCP client.
+
 This is not a hardened sandbox — skills run with the server's privileges
 in a fresh CWD. Run untrusted skills inside a container or a nsjail-style
 wrapper if you need stronger isolation.
@@ -28,6 +42,11 @@ import tempfile
 from typing import Any
 
 _CODE_BLOCK_RE = re.compile(r"```(?:python|py)\s*\n(.*?)```", re.DOTALL)
+
+# Absolute path to the directory containing this file (the selfMCP repo
+# root). Used to expose ``selfmcp_sdk`` and friends on the child's
+# PYTHONPATH so skills can compose each other.
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 def extract_code(body: str) -> str:
@@ -61,6 +80,25 @@ def execute_skill(
 
         env = os.environ.copy()
         env["SELFMCP_PARAMS"] = json.dumps(params)
+
+        # Make the DB path absolute so the in-skill SDK can find the same
+        # database the server is using even though the subprocess runs
+        # from a temp cwd. Resolution happens against the *server's* cwd
+        # (i.e. this process), which is the right anchor for relative
+        # paths like the default "selfmcp.db".
+        db_path = env.get("SELFMCP_DB_PATH", "selfmcp.db")
+        if not os.path.isabs(db_path):
+            db_path = os.path.abspath(db_path)
+        env["SELFMCP_DB_PATH"] = db_path
+
+        # Expose the in-skill SDK (selfmcp_sdk, executor, db, ...) on the
+        # child's PYTHONPATH so a skill body can do `from selfmcp_sdk
+        # import run_skill` and compose other skills.
+        existing_pp = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = (
+            _REPO_ROOT + os.pathsep + existing_pp if existing_pp else _REPO_ROOT
+        )
+
         if env_overrides:
             env.update(env_overrides)
 

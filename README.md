@@ -105,9 +105,12 @@ subprocess inherits the server's full environment), so this skill is for
 ## Using API keys in skills
 
 Skills run as Python subprocesses that **inherit the server's full environment**.
-This means any environment variable (API key, secret, config) set on the server
-is automatically available inside skill code via `os.environ` — no need to pass
-keys as parameters.
+They also get the in-skill SDK (`selfmcp_sdk`) on `PYTHONPATH` so they can call
+other registered skills — see [Composing skills](#composing-skills-skill--skill-calls).
+
+Inheriting the environment means any environment variable (API key, secret,
+config) set on the server is automatically available inside skill code via
+`os.environ` — no need to pass keys as parameters.
 
 ### Reading a key inside a skill
 
@@ -182,6 +185,131 @@ When the key is missing, `skill_execute` returns:
   "hint": "Call skill_auth_url(skill_id=1) for setup instructions. On Replit, add the missing vars at: https://replit.com/@you/your-repl#secrets"
 }
 ```
+
+### Calling other skills from a new skill
+
+Before re-implementing logic, check whether the registry already has a
+skill that does part of the job. If it does, import the in-skill SDK and
+delegate. The SDK is always available — you don't need to add it to
+`dependencies`:
+
+```python
+skill_create(
+    name="haiku_to_slack",
+    description="Generate a haiku via the write_haiku skill and post it to Slack.",
+    body="""
+import json, os
+from selfmcp_sdk import run_skill
+
+params = json.loads(os.environ.get("SELFMCP_PARAMS", "{}"))
+topic = params.get("topic", "nature")
+channel = params.get("channel", "#random")
+
+# Delegate text generation to an existing skill.
+gen = run_skill("write_haiku", params={"topic": topic})
+if gen.get("error") or gen.get("exit_code") != 0:
+    raise SystemExit(gen.get("stderr") or gen.get("error"))
+
+# Delegate posting to another existing skill.
+post = run_skill("slack_poster", params={"channel": channel, "text": gen["stdout"]})
+print(json.dumps({"posted": post.get("exit_code") == 0, "haiku": gen["stdout"]}))
+""",
+    # No extra dependencies — selfmcp_sdk is auto-injected by the executor.
+)
+```
+
+See [Composing skills](#composing-skills-skill--skill-calls) below for the
+full SDK reference, recursion rules, and more examples.
+
+## Composing skills (skill → skill calls)
+
+Skills can call **other** skills directly, without going back through the
+MCP client. Every skill subprocess gets the in-skill SDK
+(`selfmcp_sdk`) auto-imported on `PYTHONPATH`, plus an absolute
+`SELFMCP_DB_PATH` so the SDK can read the same registry the server is
+using.
+
+### The SDK
+
+```python
+from selfmcp_sdk import (
+    list_skills,    # [{id, name, description}] for every active skill
+    search_skills,  # keyword (FTS5/BM25) search → [{id, name, description}]
+    get_skill,      # full record (incl. body) by id or name, or None
+    run_skill,      # spawn another skill in a fresh subprocess
+)
+```
+
+`run_skill(name_or_id, params=None, timeout=30)` returns the same shape
+as the top-level `skill_execute` tool:
+
+```python
+{"stdout": str, "stderr": str, "exit_code": int, "timed_out": bool}
+```
+
+…or, on a lookup / auth failure:
+
+```python
+{"error": "skill_not_found", "ref": "..."}
+{"error": "missing_credentials", "missing": ["..."]}
+```
+
+The auth check mirrors the server: if the target skill declares an
+`auth_config` whose env vars are unset, the call short-circuits with
+`missing_credentials` instead of running the body and producing a
+cryptic 401.
+
+### Example: a parent skill that picks a child by search
+
+```python
+import json
+from selfmcp_sdk import search_skills, run_skill
+
+# Discover a poster skill on the fly.
+hits = search_skills("slack post message")
+if not hits:
+    raise SystemExit("no slack-poster skill in the registry yet")
+
+result = run_skill(
+    hits[0]["id"],
+    params={"channel": "#general", "text": "hello from a parent skill"},
+)
+if result["exit_code"] != 0:
+    raise SystemExit(result["stderr"])
+
+print(json.dumps({"posted": True, "child_stdout": result["stdout"]}))
+```
+
+### Example: a one-shot pipeline skill
+
+```python
+from selfmcp_sdk import run_skill
+
+raw = run_skill("fetch_rss",     params={"feed": "https://example.com/feed.xml"})
+sum_ = run_skill("summarize_text", params={"text": raw["stdout"]})
+run_skill("post_to_slack",        params={"channel": "#news", "text": sum_["stdout"]})
+```
+
+### Notes & gotchas
+
+- **Recursion is allowed.** A skill called via `run_skill` can itself
+  call `run_skill` — each call spawns a fresh subprocess. There is no
+  built-in recursion limit; the per-call `timeout` and the OS process
+  tree are the only stops, so don't build cycles.
+- **Each call is a fresh subprocess.** Sub-skills do *not* share Python
+  state with the parent; the only channels are `params` (in) and
+  `stdout` / `stderr` / `exit_code` (out).
+- **The parent's `SELFMCP_PARAMS` is overwritten** for the child, so a
+  child only sees the params the parent passes it explicitly.
+- **`search_skills` is keyword-only** inside the SDK on purpose — it
+  avoids loading the embedding stack into every subprocess. For
+  semantic / hybrid search, call the top-level `skill_search` MCP tool
+  from the client instead.
+- **Authoring tip:** when you write a new skill, prefer composing
+  existing skills via `selfmcp_sdk` over re-implementing logic that's
+  already in the registry. Run `skill_list_summary` (or
+  `selfmcp_sdk.list_skills()` from inside another skill) first to see
+  what's already available.
 
 ## Storage
 
@@ -395,7 +523,8 @@ server.py       FastMCP entry point — registers the 8 bootstrap tools
 skills.py       Plain-Python core logic (what the decorators wrap)
 db.py           SQLite schema + connection helper
 embeddings.py   LiteLLM embeddings with offline hash fallback
-executor.py     Subprocess sandbox for skill_execute
+executor.py     Subprocess sandbox for skill_execute (injects selfmcp_sdk)
+selfmcp_sdk.py  In-skill SDK so a skill body can call other skills
 test_selfmcp.py Tests for the core logic
 ```
 

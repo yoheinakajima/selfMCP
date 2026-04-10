@@ -36,10 +36,11 @@ _ABOUT_SKILL_NAME = "selfmcp_about"
 _ABOUT_SKILL_DESCRIPTION = (
     "Self-documentation for the selfMCP server. Returns structured facts about "
     "the source code location, interface, versioning, skill execution model, auth, "
-    "all 8 bootstrap tools, search, and Replit setup. "
+    "skill composition (calling skills from inside other skills), all 8 bootstrap "
+    "tools, search, and Replit setup. "
     "Pass {\"section\": \"<key>\"} to focus on one area, or omit params for the full doc. "
     "Available sections: source_code, interface, transport, persistence, versioning, "
-    "execution, auth, bootstrap_tools, search, replit_setup."
+    "execution, composition, auth, bootstrap_tools, search, replit_setup."
 )
 
 _ABOUT_SKILL_BODY = '''import json, os
@@ -102,6 +103,42 @@ INFO = {
             "fresh CWD. Wrap in a container or nsjail for untrusted code."
         ),
     },
+    "composition": {
+        "how": (
+            "Skills can call other skills via the selfmcp_sdk module, which is "
+            "auto-importable inside any skill subprocess. The executor injects the "
+            "selfMCP repo root onto PYTHONPATH and forwards an absolute "
+            "SELFMCP_DB_PATH so the SDK can read the same registry the server uses."
+        ),
+        "api": (
+            "from selfmcp_sdk import run_skill, search_skills, get_skill, list_skills"
+        ),
+        "run_skill": (
+            "run_skill(name_or_id, params=None, timeout=30) spawns a fresh "
+            "subprocess for the target skill and returns "
+            "{stdout, stderr, exit_code, timed_out} — the same shape as the "
+            "server-side skill_execute tool. Returns "
+            "{\'error\': \'skill_not_found\'} or "
+            "{\'error\': \'missing_credentials\', \'missing\': [...]} on failure."
+        ),
+        "discovery": (
+            "search_skills(query, top_k=5) does keyword (FTS5/BM25) search and "
+            "returns [{id,name,description}]. list_skills() returns the same "
+            "shape for every active skill. get_skill(name_or_id) returns the "
+            "full record including the body, so a parent skill can inspect a "
+            "child before invoking it."
+        ),
+        "recursion": (
+            "Sub-skills can themselves call run_skill — composition is recursive. "
+            "There is no built-in recursion limit; the per-call timeout and OS "
+            "process tree are the only stops."
+        ),
+        "example": (
+            "from selfmcp_sdk import run_skill\\n"
+            "out = run_skill(\'slack_poster\', params={\'text\': \'hi\'})\\n"
+            "print(out[\'stdout\'])"
+        ),
+    },
     "auth": {
         "declare": (
             "Add auth_config to skill_create for any skill that reads an env-var key. "
@@ -139,6 +176,11 @@ INFO = {
             "Falls back to a deterministic hash-based 256-dim embedding when offline."
         ),
         "workflow": "skill_list_summary → skill_search → skill_get_detail → skill_execute",
+        "in_skill_search": (
+            "Skills running in a subprocess can also search the registry directly "
+            "via `from selfmcp_sdk import search_skills` — keyword-only, no MCP "
+            "round trip required. See section 'composition' for the full SDK."
+        ),
     },
     "replit_setup": [
         "1. Import the repo from GitHub (yoheinakajima/selfMCP) into Replit.",
