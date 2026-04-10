@@ -130,10 +130,60 @@ All env vars:
 | `SELFMCP_DB_PATH`   | `./selfmcp.db`          | SQLite file location                  |
 | `SELFMCP_TRANSPORT` | `streamable-http`       | `stdio`, `sse`, or `streamable-http`  |
 | `SELFMCP_HOST`      | `0.0.0.0`               | HTTP bind host                        |
-| `SELFMCP_PORT`      | `8000`                  | HTTP bind port                        |
+| `SELFMCP_PORT`      | `8000`                  | HTTP bind port (falls back to `PORT`) |
 | `SELFMCP_EMBED_MODEL` | `text-embedding-3-small` | LiteLLM embedding model            |
 | `SELFMCP_USE_LITELLM` | _(unset)_             | Force LiteLLM without an OPENAI key   |
 | `OPENAI_API_KEY`    | _(unset)_               | Enables remote LiteLLM embeddings     |
+
+## Running on Replit
+
+1. **Fork / import** the repo into Replit (use "Import from GitHub").
+
+2. Replit auto-detects `requirements.txt` and installs dependencies. If it
+   doesn't, open the Shell and run:
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. The included `.replit` file sets `SELFMCP_TRANSPORT=streamable-http` and
+   uses `python3 server.py` as the run command. Just press **Run**.
+
+4. The server picks up Replit's injected `PORT` environment variable
+   automatically, so no manual port configuration is needed.
+
+5. **(Optional)** Add secrets in **Tools → Secrets**:
+
+   | Secret key          | Value                        |
+   |---------------------|------------------------------|
+   | `OPENAI_API_KEY`    | `sk-...` (enables real embeddings) |
+   | `SELFMCP_DB_PATH`   | `/home/user/selfmcp.db` (explicit persistent path) |
+
+6. **Connect Claude.ai** — once the Repl is running, copy the public URL
+   (shown in the Webview tab, e.g. `https://<repl-name>.<username>.repl.co`)
+   and register it as a remote MCP server in Claude.ai:
+
+   ```
+   https://<repl-name>.<username>.repl.co/mcp
+   ```
+
+   In Claude Desktop you can also point at the Replit URL instead of running
+   the server locally:
+
+   ```json
+   {
+     "mcpServers": {
+       "selfmcp": {
+         "url": "https://<repl-name>.<username>.repl.co/mcp"
+       }
+     }
+   }
+   ```
+
+> **Persistence note:** Replit's filesystem is persistent across runs for
+> private Repls. The SQLite database (`selfmcp.db`) will survive restarts.
+> If you're using a free Repl that may be reset, set `SELFMCP_DB_PATH` to a
+> path inside a mounted volume, or export/import the `.db` file periodically.
 
 ## Connecting from Claude
 

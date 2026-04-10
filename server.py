@@ -36,7 +36,7 @@ def build_server() -> FastMCP:
             "you encounter a task that would benefit from being captured for reuse."
         ),
         host=os.environ.get("SELFMCP_HOST", "0.0.0.0"),
-        port=int(os.environ.get("SELFMCP_PORT", "8000")),
+        port=int(os.environ.get("SELFMCP_PORT", os.environ.get("PORT", "8000"))),
     )
 
     # ------------------------------------------------------------------ CRUD

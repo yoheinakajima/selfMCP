@@ -1,0 +1,12 @@
+run = "python3 server.py"
+entrypoint = "server.py"
+
+[env]
+SELFMCP_TRANSPORT = "streamable-http"
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+run = ["sh", "-c", "python3 server.py"]
+deploymentTarget = "cloudrun"
