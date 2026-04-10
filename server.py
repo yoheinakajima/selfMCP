@@ -24,7 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 import skills as S
 from db import init_db
-from skills import seed_about_skill
+from skills import seed_core_skills
 
 
 def build_server() -> FastMCP:
@@ -41,9 +41,12 @@ def build_server() -> FastMCP:
             "skill code — never pass keys as params; declare auth_config so skill_execute "
             "can detect a missing key before running. "
             "Workflow: skill_list_summary → skill_search → skill_get_detail → skill_execute. "
-            "Self-documentation: a built-in skill named 'selfmcp_about' is always in the "
-            "registry — execute it (find its id with skill_search('selfmcp_about')) for "
-            "detailed answers about versioning, execution, auth, all 8 tools, and setup."
+            "Core skills (always present, undeletable): "
+            "'selfmcp_about' — execute it for detailed self-documentation about "
+            "versioning, execution, auth, all 8 tools, and setup. "
+            "'selfmcp_env_keys' — execute it to discover which API keys / credential "
+            "env vars are currently available on the server (names only, never values), "
+            "so you know which external APIs you can call before authoring skills."
         ),
         host=os.environ.get("SELFMCP_HOST", "0.0.0.0"),
         port=int(os.environ.get("SELFMCP_PORT", os.environ.get("PORT", "8000"))),
@@ -171,7 +174,7 @@ def build_server() -> FastMCP:
 
 def main() -> None:
     init_db()
-    seed_about_skill()
+    seed_core_skills()
     transport = os.environ.get("SELFMCP_TRANSPORT", "streamable-http")
     if transport not in ("stdio", "sse", "streamable-http"):
         raise SystemExit(

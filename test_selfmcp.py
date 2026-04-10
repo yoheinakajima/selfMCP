@@ -299,3 +299,121 @@ def test_get_embedding_returns_vector_and_model():
     vec, model = get_embedding("hello")
     assert isinstance(vec, list) and vec
     assert isinstance(model, str) and model
+
+
+# --------------------------------------------------------------------------- #
+# Core skills (undeletable built-ins)
+# --------------------------------------------------------------------------- #
+
+def test_seed_core_skills_creates_both_builtins():
+    skills.seed_core_skills()
+    summary = skills.skill_list_summary()
+    names = {s["name"] for s in summary}
+    assert "selfmcp_about" in names
+    assert "selfmcp_env_keys" in names
+
+
+def test_seed_core_skills_is_idempotent():
+    skills.seed_core_skills()
+    first = skills.skill_list_summary()
+    skills.seed_core_skills()
+    second = skills.skill_list_summary()
+    # Same ids, no duplicates created on second call.
+    assert [s["id"] for s in first] == [s["id"] for s in second]
+
+
+def test_core_skill_cannot_be_deleted():
+    skills.seed_core_skills()
+    about = next(
+        s for s in skills.skill_list_summary() if s["name"] == "selfmcp_about"
+    )
+    res = skills.skill_delete(about["id"])
+    assert res.get("error") == "cannot_delete_core_skill"
+    # Still in the summary — not actually deleted.
+    assert any(
+        s["name"] == "selfmcp_about" for s in skills.skill_list_summary()
+    )
+
+
+def test_env_keys_skill_cannot_be_deleted():
+    skills.seed_core_skills()
+    env_skill = next(
+        s for s in skills.skill_list_summary() if s["name"] == "selfmcp_env_keys"
+    )
+    res = skills.skill_delete(env_skill["id"])
+    assert res.get("error") == "cannot_delete_core_skill"
+    assert any(
+        s["name"] == "selfmcp_env_keys" for s in skills.skill_list_summary()
+    )
+
+
+def test_core_skill_cannot_be_renamed_but_body_can_be_updated():
+    skills.seed_core_skills()
+    about = next(
+        s for s in skills.skill_list_summary() if s["name"] == "selfmcp_about"
+    )
+    # Rename is rejected.
+    rename_res = skills.skill_update(about["id"], name="custom_about")
+    assert rename_res.get("error") == "cannot_rename_core_skill"
+    # Name unchanged after the failed rename.
+    detail = skills.skill_get_detail(about["id"])
+    assert detail["name"] == "selfmcp_about"
+    # Body edits ARE allowed.
+    body_res = skills.skill_update(about["id"], body="print('custom body')")
+    assert body_res.get("status") == "updated"
+    assert "custom body" in skills.skill_get_detail(about["id"])["body"]
+
+
+def test_seed_core_skills_reactivates_legacy_soft_deleted_row():
+    # Simulate a legacy DB where the about skill was deleted before the
+    # undeletable guard existed: insert a row directly with is_active=0.
+    import time as _t
+    with db.get_conn() as conn:
+        conn.execute(
+            "INSERT INTO skills (name, description, body, dependencies_json, "
+            "auth_config_json, version, is_active, created_at, updated_at) "
+            "VALUES (?, ?, ?, '[]', NULL, 1, 0, ?, ?)",
+            ("selfmcp_about", "legacy deleted", "print('old')", _t.time(), _t.time()),
+        )
+    skills.seed_core_skills()
+    names = {s["name"] for s in skills.skill_list_summary()}
+    assert "selfmcp_about" in names
+    assert "selfmcp_env_keys" in names
+
+
+def test_env_keys_skill_runs_and_reports_known_services(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test-xyz")
+    monkeypatch.setenv("CUSTOM_SERVICE_API_KEY", "abc123")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    skills.seed_core_skills()
+    env_skill = next(
+        s for s in skills.skill_list_summary() if s["name"] == "selfmcp_env_keys"
+    )
+    result = skills.skill_execute(env_skill["id"], params={}, timeout=15)
+    assert result["exit_code"] == 0, result.get("stderr")
+    payload = json.loads(result["stdout"])
+
+    # Curated list shows correct present/absent status.
+    assert payload["known_services"]["ANTHROPIC_API_KEY"]["present"] is True
+    assert payload["known_services"]["OPENAI_API_KEY"]["present"] is False
+
+    # Detected list surfaces both well-known and unknown credential-shaped vars.
+    assert "ANTHROPIC_API_KEY" in payload["detected_credential_env_vars"]
+    assert "CUSTOM_SERVICE_API_KEY" in payload["detected_credential_env_vars"]
+    assert "CUSTOM_SERVICE_API_KEY" in payload["additional_detected"]
+
+    # The skill MUST never leak the actual secret value.
+    assert "sk-ant-test-xyz" not in result["stdout"]
+    assert "abc123" not in result["stdout"]
+
+    # SELFMCP_* internals should not be flagged as credentials.
+    assert not any(
+        k.startswith("SELFMCP_") for k in payload["detected_credential_env_vars"]
+    )
+
+
+def test_is_core_skill_helper():
+    assert skills.is_core_skill("selfmcp_about") is True
+    assert skills.is_core_skill("selfmcp_env_keys") is True
+    assert skills.is_core_skill("some_user_skill") is False

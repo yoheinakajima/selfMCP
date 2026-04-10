@@ -21,8 +21,15 @@ from executor import execute_skill as _execute_skill
 
 
 # --------------------------------------------------------------------------- #
-# Built-in self-documentation skill
+# Built-in "core" skills — always seeded, never deletable
 # --------------------------------------------------------------------------- #
+#
+# Core skills differ from user-created skills in two ways:
+#   1. They are seeded into the registry on first startup (and re-activated
+#      on startup if a legacy DB has them soft-deleted).
+#   2. skill_delete refuses to remove them, and skill_update refuses to
+#      rename them, so the _CORE_SKILL_NAMES lookup stays stable.
+# Their body and description can still be updated by the user.
 
 _ABOUT_SKILL_NAME = "selfmcp_about"
 
@@ -153,20 +160,162 @@ else:
 '''
 
 
-def seed_about_skill() -> None:
-    """Ensure the built-in selfmcp_about skill exists in the registry.
+# --------------------------------------------------------------------------- #
+# Built-in environment / API key discovery skill
+# --------------------------------------------------------------------------- #
 
-    Called once at server startup. Creates the skill only if no row
-    (active or deleted) with the name already exists, so a user who
-    intentionally deletes it won't have it resurrected on every restart.
+_ENV_KEYS_SKILL_NAME = "selfmcp_env_keys"
+
+_ENV_KEYS_SKILL_DESCRIPTION = (
+    "List API keys and credential environment variables available to the selfMCP "
+    "server. Returns NAMES ONLY (never values) — a curated set of well-known "
+    "services (Anthropic, OpenAI, GitHub, Slack, AWS, ...) each with a present/"
+    "absent flag, plus any other env var matching credential-shaped name patterns "
+    "(*_API_KEY, *_TOKEN, *_SECRET, *_PASSWORD). Call this to discover which "
+    "external APIs the server can reach before authoring or executing skills "
+    "that depend on them. Takes no parameters."
+)
+
+_ENV_KEYS_SKILL_BODY = '''import json, os, re
+
+# Patterns that identify credential-shaped environment variable names.
+_PATTERNS = [
+    re.compile(r".+_API_KEY$"),
+    re.compile(r".+_TOKEN$"),
+    re.compile(r".+_SECRET$"),
+    re.compile(r".+_KEY$"),
+    re.compile(r".+_PASSWORD$"),
+    re.compile(r".+_CREDENTIALS$"),
+    re.compile(r"^API_KEY$"),
+]
+
+# Curated list of well-known credential env vars with a friendly service label.
+# Extend this list as new integrations become common.
+_KNOWN = {
+    "ANTHROPIC_API_KEY": "Anthropic / Claude API",
+    "OPENAI_API_KEY": "OpenAI (GPT, embeddings, DALL-E)",
+    "GEMINI_API_KEY": "Google Gemini",
+    "GOOGLE_API_KEY": "Google Cloud APIs",
+    "MISTRAL_API_KEY": "Mistral AI",
+    "GROQ_API_KEY": "Groq",
+    "COHERE_API_KEY": "Cohere",
+    "PERPLEXITY_API_KEY": "Perplexity",
+    "XAI_API_KEY": "xAI (Grok)",
+    "REPLICATE_API_TOKEN": "Replicate",
+    "HF_TOKEN": "Hugging Face",
+    "HUGGINGFACE_API_KEY": "Hugging Face",
+    "GITHUB_TOKEN": "GitHub",
+    "SLACK_BOT_TOKEN": "Slack Bot",
+    "SLACK_API_TOKEN": "Slack API",
+    "DISCORD_BOT_TOKEN": "Discord Bot",
+    "NOTION_API_KEY": "Notion",
+    "STRIPE_API_KEY": "Stripe",
+    "SENDGRID_API_KEY": "SendGrid",
+    "RESEND_API_KEY": "Resend",
+    "TWILIO_AUTH_TOKEN": "Twilio",
+    "AWS_ACCESS_KEY_ID": "AWS",
+    "AWS_SECRET_ACCESS_KEY": "AWS",
+    "BRAVE_API_KEY": "Brave Search",
+    "SERPAPI_API_KEY": "SerpAPI",
+    "TAVILY_API_KEY": "Tavily Search",
+    "EXA_API_KEY": "Exa Search",
+    "PINECONE_API_KEY": "Pinecone",
+    "WEAVIATE_API_KEY": "Weaviate",
+    "ELEVENLABS_API_KEY": "ElevenLabs",
+    "DEEPGRAM_API_KEY": "Deepgram",
+    "FIRECRAWL_API_KEY": "Firecrawl",
+    "LINEAR_API_KEY": "Linear",
+    "FIGMA_ACCESS_TOKEN": "Figma",
+}
+
+# selfMCP internals and generic shell vars we never surface as credentials.
+_IGNORE_PREFIXES = ("SELFMCP_",)
+_IGNORE_EXACT = {
+    "PATH", "PWD", "HOME", "SHELL", "USER", "LOGNAME",
+    "TERM", "LANG", "HOSTNAME", "OLDPWD", "_",
+}
+
+
+def _is_credential_like(name: str) -> bool:
+    if name in _IGNORE_EXACT:
+        return False
+    if any(name.startswith(p) for p in _IGNORE_PREFIXES):
+        return False
+    return any(p.match(name) for p in _PATTERNS)
+
+
+known = {}
+for k, label in sorted(_KNOWN.items()):
+    known[k] = {"present": bool(os.environ.get(k)), "service": label}
+
+detected = sorted(k for k in os.environ if _is_credential_like(k))
+# Additional detected keys the curated list did not already cover.
+additional = sorted(k for k in detected if k not in _KNOWN)
+
+result = {
+    "known_services": known,
+    "detected_credential_env_vars": detected,
+    "additional_detected": additional,
+    "note": (
+        "Only environment variable NAMES are returned — selfMCP never exposes "
+        "secret values. Skills executed via skill_execute inherit the server\'s "
+        "full environment, so skill code can read the actual values at runtime "
+        "with os.environ.get(NAME). Use this list to decide which external APIs "
+        "are reachable and which skills can be meaningfully authored or executed."
+    ),
+}
+
+print(json.dumps(result, indent=2))
+'''
+
+
+# --------------------------------------------------------------------------- #
+# Core skill registry
+# --------------------------------------------------------------------------- #
+
+# (name, description, body) tuples for every built-in core skill.
+_CORE_SKILLS: tuple[tuple[str, str, str], ...] = (
+    (_ABOUT_SKILL_NAME, _ABOUT_SKILL_DESCRIPTION, _ABOUT_SKILL_BODY),
+    (_ENV_KEYS_SKILL_NAME, _ENV_KEYS_SKILL_DESCRIPTION, _ENV_KEYS_SKILL_BODY),
+)
+
+# Set of names that cannot be deleted or renamed. Derived from _CORE_SKILLS so
+# the two can never drift.
+_CORE_SKILL_NAMES: frozenset[str] = frozenset(name for name, _, _ in _CORE_SKILLS)
+
+
+def is_core_skill(name: str) -> bool:
+    """Return True if ``name`` is a built-in, undeletable core skill."""
+    return name in _CORE_SKILL_NAMES
+
+
+def seed_core_skills() -> None:
+    """Ensure every built-in core skill exists and is active in the registry.
+
+    Called once at server startup. For each core skill:
+      - If no row exists with that name, create it.
+      - If a row exists but was soft-deleted (legacy DB from before the
+        undeletable guard), reactivate it via ``skill_create``.
+      - Otherwise leave the existing row alone so user edits are preserved.
     """
-    with get_conn() as conn:
-        row = conn.execute(
-            "SELECT id FROM skills WHERE name = ?", (_ABOUT_SKILL_NAME,)
-        ).fetchone()
-    if row is not None:
-        return  # Already exists (active or deleted) — leave it alone
-    skill_create(_ABOUT_SKILL_NAME, _ABOUT_SKILL_DESCRIPTION, _ABOUT_SKILL_BODY)
+    for name, description, body in _CORE_SKILLS:
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT id, is_active FROM skills WHERE name = ?", (name,)
+            ).fetchone()
+        if row is None:
+            skill_create(name, description, body)
+        elif not row["is_active"]:
+            # Reactivate legacy soft-deleted core skill.
+            skill_create(name, description, body)
+
+
+# Backwards-compatible alias — earlier versions of the server only seeded
+# the about skill. Keep the old name importable so external callers and
+# docs don't break.
+def seed_about_skill() -> None:
+    """Deprecated alias for :func:`seed_core_skills`."""
+    seed_core_skills()
 
 
 # --------------------------------------------------------------------------- #
@@ -375,6 +524,11 @@ def skill_update(
 ) -> dict[str, Any]:
     """Patch an existing skill. Only provided fields are overwritten.
     Archives the prior row to skill_versions and bumps ``version``.
+
+    Core skills (see ``_CORE_SKILL_NAMES``) may have their body, description,
+    dependencies, or auth_config updated, but their **name is fixed** so the
+    core-skill lookup stays stable. Attempts to rename a core skill return an
+    error without mutating state.
     """
     now = time.time()
     with get_conn() as conn:
@@ -383,6 +537,21 @@ def skill_update(
         ).fetchone()
         if not row:
             return {"error": f"skill {skill_id} not found"}
+
+        if (
+            row["name"] in _CORE_SKILL_NAMES
+            and name is not None
+            and name != row["name"]
+        ):
+            return {
+                "error": "cannot_rename_core_skill",
+                "name": row["name"],
+                "message": (
+                    f"'{row['name']}' is a built-in core selfMCP skill; its name "
+                    "is fixed. You can still update its description, body, "
+                    "dependencies, or auth_config."
+                ),
+            }
 
         _archive_version(conn, row)
 
@@ -422,6 +591,11 @@ def skill_delete(skill_id: int) -> dict[str, Any]:
     """Soft-delete a skill. The row stays in ``skills`` with ``is_active=0``
     and the last active state is appended to ``skill_versions`` so you
     can still diff / restore.
+
+    Built-in core skills (see ``_CORE_SKILL_NAMES``) are undeletable — the
+    server always keeps ``selfmcp_about`` and ``selfmcp_env_keys`` in the
+    registry. Calling ``skill_delete`` on one of them is a no-op and returns
+    a ``cannot_delete_core_skill`` error.
     """
     now = time.time()
     with get_conn() as conn:
@@ -430,6 +604,16 @@ def skill_delete(skill_id: int) -> dict[str, Any]:
         ).fetchone()
         if not row:
             return {"error": f"skill {skill_id} not found"}
+
+        if row["name"] in _CORE_SKILL_NAMES:
+            return {
+                "error": "cannot_delete_core_skill",
+                "name": row["name"],
+                "message": (
+                    f"'{row['name']}' is a built-in core selfMCP skill and "
+                    "cannot be deleted. It is always available in the registry."
+                ),
+            }
 
         _archive_version(conn, row)
         conn.execute(
